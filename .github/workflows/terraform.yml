@@ -1,0 +1,200 @@
+name: Terraform Infrastructure
+
+# PR to main        → plan only
+# Push/merge to main → plan (auto) → approval gate → apply
+# Manual dispatch    → plan, apply, or destroy dev environment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'envs/dev/**'
+      - 'modules/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'envs/dev/**'
+      - 'modules/**'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: 'plan'
+        type: choice
+        options: [plan, apply, destroy]
+      confirm_destroy:
+        description: 'Type "destroy" to confirm destruction (required when action=destroy)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  TF_VERSION: '1.15.6'
+  AWS_REGION: us-east-1
+
+# Prevent parallel runs on the same branch — avoids state conflicts
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false   # wait, don't cancel — safer for Terraform
+
+jobs:
+  # ── Plan ──────────────────────────────────────────────────────────────────
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: envs/dev
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -var="db_password=${{ secrets.DEV_DB_PASSWORD }}" \
+            -var="jwt_secret=${{ secrets.DEV_JWT_SECRET }}" \
+            -var="github_org=${{ vars.GH_ORG }}" \
+            -out=tfplan \
+            -no-color
+        continue-on-error: true
+
+      - name: Check plan status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Release state lock on failure
+        if: failure() || cancelled()
+        run: |
+          aws s3 rm s3://${{ vars.TF_STATE_BUCKET }}/envs/dev/terraform.tfstate.tflock || true
+
+      - name: Upload plan file
+        if: steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: tfplan
+          path: envs/dev/tfplan
+          retention-days: 1
+
+  # ── Apply ─────────────────────────────────────────────────────────────────
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: plan
+    if: |
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment: dev   # ← pauses here and waits for manual approval
+    defaults:
+      run:
+        working-directory: envs/dev
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Download plan file
+        uses: actions/download-artifact@v7
+        with:
+          name: tfplan
+          path: envs/dev
+
+      - name: Terraform Apply
+        run: |
+          terraform apply \
+            -auto-approve \
+            -no-color \
+            tfplan
+
+      - name: Release state lock on failure
+        if: failure() || cancelled()
+        run: |
+          aws s3 rm s3://${{ vars.TF_STATE_BUCKET }}/envs/dev/terraform.tfstate.tflock || true
+
+  # ── Destroy ───────────────────────────────────────────────────────────────
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.action == 'destroy' &&
+      github.event.inputs.confirm_destroy == 'destroy'
+    environment: dev   # ← approval gate for destroy too
+    defaults:
+      run:
+        working-directory: envs/dev
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Destroy
+        run: |
+          terraform destroy \
+            -var="db_password=${{ secrets.DEV_DB_PASSWORD }}" \
+            -var="jwt_secret=${{ secrets.DEV_JWT_SECRET }}" \
+            -var="github_org=${{ vars.GH_ORG }}" \
+            -auto-approve \
+            -no-color
+
+      - name: Release state lock on failure
+        if: failure() || cancelled()
+        run: |
+          aws s3 rm s3://${{ vars.TF_STATE_BUCKET }}/envs/dev/terraform.tfstate.tflock || true
