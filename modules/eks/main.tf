@@ -26,10 +26,11 @@ module "eks" {
 
   eks_managed_node_groups = {
     main = {
-      instance_types = var.instance_types
-      min_size       = var.min_size
-      max_size       = var.max_size
-      desired_size   = var.desired_size
+      kubernetes_version = var.kubernetes_version
+      instance_types     = var.instance_types
+      min_size           = var.min_size
+      max_size           = var.max_size
+      desired_size       = var.desired_size
     }
   }
 

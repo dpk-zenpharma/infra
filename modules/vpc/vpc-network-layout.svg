@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600" role="img" aria-labelledby="title desc">
+  <title id="title">Conceptual ZenPharma VPC network layout</title>
+  <desc id="desc">The 10.0.0.0/16 VPC contains two public subnets, two private EKS subnets, and two private database subnets across two availability zones. Internet traffic reaches public load balancers through an Internet Gateway. Private EKS subnets use one NAT Gateway for outbound internet access. RDS is placed in database subnets and accepts PostgreSQL traffic from the EKS node security group.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #0f172a; }
+      .small { font-size: 13px; }
+      .label { font-size: 15px; font-weight: 700; }
+      .zone { font-size: 18px; font-weight: 700; }
+      .box { stroke-width: 2; rx: 12; }
+      .arrow { fill: none; stroke: #334155; stroke-width: 2.5; marker-end: url(#arrow); }
+      .dashed { stroke-dasharray: 7 6; }
+    </style>
+  </defs>
+  <rect width="1000" height="600" fill="#f8fafc"/>
+  <text x="40" y="38" font-size="23" font-weight="700">ZenPharma dev — conceptual VPC layout</text>
+  <text x="40" y="62" class="small">VPC CIDR: 10.0.0.0/16 · Region: us-east-1 · Diagram is illustrative, not a live AWS view</text>
+
+  <rect x="28" y="82" width="944" height="484" rx="20" fill="#fff" stroke="#64748b" stroke-width="2.5"/>
+  <text x="48" y="111" class="label">VPC: pharma-dev-vpc · 10.0.0.0/16</text>
+
+  <rect x="48" y="132" width="280" height="390" rx="15" fill="#eff6ff" stroke="#60a5fa" stroke-width="2"/>
+  <text x="68" y="162" class="zone">Public subnets</text>
+  <text x="68" y="185" class="small">Internet-facing entry / NAT</text>
+  <rect x="68" y="206" width="240" height="72" class="box" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="84" y="233" class="label">us-east-1a</text>
+  <text x="84" y="255" class="small">10.0.1.0/24 · Load balancer eligible</text>
+  <rect x="68" y="294" width="240" height="72" class="box" fill="#dbeafe" stroke="#3b82f6"/>
+  <text x="84" y="321" class="label">us-east-1b</text>
+  <text x="84" y="343" class="small">10.0.2.0/24 · Load balancer eligible</text>
+  <rect x="68" y="397" width="240" height="92" class="box" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="84" y="425" class="label">One NAT Gateway</text>
+  <text x="84" y="448" class="small">Placed in a public subnet</text>
+  <text x="84" y="469" class="small">Private workloads use it outbound</text>
+
+  <rect x="360" y="132" width="280" height="390" rx="15" fill="#f0fdf4" stroke="#4ade80" stroke-width="2"/>
+  <text x="380" y="162" class="zone">Private EKS subnets</text>
+  <text x="380" y="185" class="small">Worker nodes / application workloads</text>
+  <rect x="380" y="206" width="240" height="72" class="box" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="396" y="233" class="label">us-east-1a</text>
+  <text x="396" y="255" class="small">10.0.3.0/24 · EKS private subnet</text>
+  <rect x="380" y="294" width="240" height="72" class="box" fill="#dcfce7" stroke="#22c55e"/>
+  <text x="396" y="321" class="label">us-east-1b</text>
+  <text x="396" y="343" class="small">10.0.4.0/24 · EKS private subnet</text>
+  <text x="382" y="420" class="small">No direct internet route.</text>
+  <text x="382" y="442" class="small">Default outbound route uses NAT.</text>
+  <text x="382" y="464" class="small">Ingress can reach workloads via LB.</text>
+
+  <rect x="672" y="132" width="280" height="390" rx="15" fill="#fff7ed" stroke="#fb923c" stroke-width="2"/>
+  <text x="692" y="162" class="zone">Database subnets</text>
+  <text x="692" y="185" class="small">Private RDS placement subnets</text>
+  <rect x="692" y="206" width="240" height="72" class="box" fill="#ffedd5" stroke="#f97316"/>
+  <text x="708" y="233" class="label">us-east-1a</text>
+  <text x="708" y="255" class="small">10.0.5.0/24 · RDS subnet group</text>
+  <rect x="692" y="294" width="240" height="72" class="box" fill="#ffedd5" stroke="#f97316"/>
+  <text x="708" y="321" class="label">us-east-1b</text>
+  <text x="708" y="343" class="small">10.0.6.0/24 · RDS subnet group</text>
+  <rect x="692" y="397" width="240" height="92" class="box" fill="#fee2e2" stroke="#ef4444"/>
+  <text x="708" y="425" class="label">RDS PostgreSQL</text>
+  <text x="708" y="448" class="small">Private · TCP 5432 from EKS SG</text>
+  <text x="708" y="469" class="small">Subnet group selects placement subnets</text>
+
+  <rect x="405" y="84" width="174" height="35" rx="17" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5"/>
+  <text x="431" y="107" class="label">Internet Gateway</text>
+  <rect x="50" y="83" width="114" height="36" rx="18" fill="#e2e8f0" stroke="#64748b" stroke-width="1.5"/>
+  <text x="74" y="107" class="label">Internet</text>
+  <path d="M164 101 L395 101" class="arrow"/>
+  <path d="M493 119 L210 196" class="arrow"/>
+  <text x="343" y="127" class="small">public route</text>
+
+  <path d="M374 454 C345 454 338 442 308 442" class="arrow"/>
+  <text x="300" y="482" class="small">outbound via NAT</text>
+  <path d="M620 332 C652 332 660 438 686 438" class="arrow"/>
+  <text x="585" y="394" class="small">TCP 5432, allowed SG source</text>
+  <path d="M308 240 C340 240 346 240 374 240" class="arrow dashed"/>
+  <text x="310" y="222" class="small">load balancer → app</text>
+</svg>
