@@ -15,3 +15,13 @@ variable "github_org" {
   type        = string
   default     = "dpk-zenpharma"
 }
+
+variable "github_owner_id" {
+  description = "Numeric GitHub owner ID for the frontend repository"
+  type        = string
+}
+
+variable "github_frontend_repository_id" {
+  description = "Numeric GitHub repository ID for the frontend repository"
+  type        = string
+}
