@@ -112,86 +112,13 @@ module "vpc" {
 ### What these settings mean
 
 - `enable_nat_gateway = true`:
-  tells the VPC module to create a NAT Gateway so resources in private subnets can start connections to the internet without being directly exposed.
+  creates a NAT Gateway so resources in private subnets can initiate internet connections without being directly reachable from the internet.
 
-  **Important:** the NAT Gateway is not placed inside a private subnet. It is placed in one of the public subnets so it can reach the Internet Gateway. Here, “the first public subnet” means the first item in the `public_subnet_cidrs` list in [envs/dev/main.tf](../../envs/dev/main.tf): `10.0.1.0/24`. The first Availability Zone in the VPC module's `azs` list is `us-east-1a`, so this subnet is in `us-east-1a`. Because `single_nat_gateway = true`, the module creates just one NAT Gateway, in that subnet; it does not create one in each of the two public subnets. The other public subnet is `10.0.2.0/24` in `us-east-1b`.
+  **Placement and routing:** The VPC module creates one NAT Gateway in the first public subnet, `10.0.1.0/24` (`us-east-1a` in this setup), and allocates an Elastic IP (EIP) for it. This is defined by the Terraform configuration—not an AWS default. It associates the private EKS subnets (`10.0.3.0/24` and `10.0.4.0/24`) with a route table whose `0.0.0.0/0` route targets the NAT Gateway; the public subnet's default route targets the Internet Gateway. The VPC module creates these routes.
 
-  **What this means, and where to verify it in AWS:** both private EKS subnets (`10.0.3.0/24` and `10.0.4.0/24`) are associated with a private route table. In the AWS Console, open **VPC → Route tables**, select the private route table, and open **Subnet associations**. Check that both EKS subnet CIDRs are listed there. Then open **Routes** for that same table and find the row whose destination is `0.0.0.0/0`. Its target should be the ID of the single NAT Gateway (shown as `nat-...`). To confirm which AZ contains that gateway, open **VPC → NAT Gateways**, select that `nat-...` ID, and check its subnet and Availability Zone; for this configuration, it is placed in the first public subnet, `10.0.1.0/24` in `us-east-1a`.
+  **Traffic flow:** `EKS node → private route table → NAT Gateway (EIP) → public route table → Internet Gateway → internet`. The NAT Gateway uses its EIP as the public source address and sends replies back to the node that initiated the connection. The EIP is associated with the NAT Gateway, not a worker node; it remains stable while attached (useful for external IP allowlists), but replacing the gateway may change it. This does not allow unsolicited internet connections to private resources.
 
-  **How to read what you see:** when a node in either associated private subnet sends traffic to an IPv4 address outside the VPC, the `0.0.0.0/0 → nat-...` row tells AWS to forward it to that NAT Gateway. Thus a node in `us-east-1b` uses the same NAT Gateway in `us-east-1a`; it does not get a separate gateway in its own AZ. The route table is the AWS Console evidence for this behavior—not a setting on the EKS node itself. This single-gateway choice lowers NAT Gateway costs, but traffic from the other AZ may cross AZ boundaries, and internet egress depends on the one gateway. AWS does not automatically fail over to a NAT Gateway in another AZ—none is configured here. For higher AZ-level availability, use one NAT Gateway per AZ and route each private subnet through the NAT Gateway in its own AZ, at higher cost.
-
-  The module performs the setup behind the scenes:
-
-  1. During `terraform apply`, the VPC module allocates an Elastic IP (EIP) for the NAT Gateway. AWS reserves this public IPv4 address for your account in the selected region; it is not the IP address of your computer. To find it after deployment, open **EC2 → Network & Security → Elastic IPs**. The **Public IPv4 address** is the address itself, and the **Allocation ID** identifies it in AWS. The NAT Gateway details also show the EIP attached to it.
-     In this app, the NAT Gateway uses the EIP as the shared, stable public source address for internet-bound traffic from EKS worker nodes in private subnets, such as when they download container images or call external APIs.
-  2. It creates the NAT Gateway in the first public subnet and attaches that Elastic IP.
-  3. It creates/uses a public route table with a route to the Internet Gateway, so the NAT Gateway can reach the internet.
-     The NAT Gateway sits in a public subnet but does not itself connect directly to the internet; the Internet Gateway is the VPC's link to the internet, and the public route table directs the NAT Gateway's outbound traffic through it. The full outbound path is private-subnet resource → NAT Gateway → Internet Gateway → internet; replies return through the NAT Gateway to the resource that started the connection. The Internet Gateway alone does not expose private-subnet resources to unsolicited inbound connections.
-     In the AWS Console, open **VPC → Route tables → Routes** to inspect both default routes: the private route table sends `0.0.0.0/0` to the NAT Gateway, and the public route table sends `0.0.0.0/0` to the Internet Gateway. Check **VPC → Internet gateways** to confirm the gateway is attached to the VPC, and **VPC → NAT gateways** to see the NAT Gateway's public subnet and attached Elastic IP.
-  4. It associates the private EKS subnets with a private route table. Because `single_nat_gateway = true`, they share one private route table.
-  5. It explicitly adds a route to that private route table: destination `0.0.0.0/0` (all IPv4 destinations) → the NAT Gateway's AWS resource ID. The module's `create_private_nat_gateway_route` option defaults to `true`.
-
-  **What does “private resources” mean here?** It means resources such as EKS worker nodes running in the private subnets (`10.0.3.0/24` and `10.0.4.0/24`). They use private IP addresses and are not directly exposed to the public internet. When one of them starts an internet connection, its traffic goes through the NAT Gateway.
-
-  **What is the “outbound address”?** It is the public source IP address that an internet destination sees for a connection started by a private resource. For example, an EKS node might have private IP `10.0.3.25`. When it connects to an external service, the NAT Gateway sends the request using its EIP as the public source address (for illustration only, `203.0.113.10` is a documentation example, not your deployed address). The external service sees the NAT Gateway's EIP, not `10.0.3.25`. With the single NAT Gateway configured here, private-subnet internet connections share that NAT Gateway's EIP. The reply comes back to the EIP and the NAT Gateway forwards it to the node that started the connection. The EIP remains the same while it stays allocated and attached to this NAT Gateway; replacing or deleting those resources may result in a different address. If an external service requires an IP allowlist, you can give it this EIP. It does not let outside users start connections directly to the private node.
-
-  **Verify these five steps in the AWS Console** (select `us-east-1` first):
-
-  1. **Elastic IP:** open **EC2 → Network & Security → Elastic IPs**. Find the EIP by the allocation ID shown on the NAT Gateway details page. Confirm it is associated with the NAT Gateway. This is the NAT's stable public address.
-     **Why it is under EC2:** Elastic IPs are public IP address resources managed by AWS's EC2 networking service. They can be associated with EC2 instances or other network resources, including a NAT Gateway. In this setup, the EIP is associated with the NAT Gateway so private-subnet traffic sent out through it has a stable public source address; it is not assigned to an EC2 worker.
-  2. **NAT Gateway placement:** open **VPC → NAT Gateways** and select the NAT Gateway for `pharma-dev-vpc`. Confirm **State** is `Available`, **Connectivity type** is `Public`, **Subnet** is `10.0.1.0/24` (first public subnet), and its **Elastic IP** matches step 1.
-  3. **Public route for NAT:** open **VPC → Route tables**. Find the route table associated with the public subnet from step 2. Under **Routes**, confirm `0.0.0.0/0` points to an Internet Gateway (`igw-...`). Under **Subnet associations**, confirm it is associated with that public subnet.
-  4. **Private subnet association:** in **VPC → Route tables**, find the route table associated with the private EKS subnets (`10.0.3.0/24` and `10.0.4.0/24`). Under **Subnet associations**, confirm both private subnets use the private route table. Because `single_nat_gateway = true`, they share one private route table in this configuration.
-  5. **Private default route to NAT:** on that same private route table, open **Routes**. Confirm `0.0.0.0/0` targets the NAT Gateway ID from step 2 (shown as `nat-...`). This is the explicit link that tells AWS to send unmatched outbound traffic from those private subnets to the NAT Gateway.
-
-  **The traffic path, in plain language:** an EKS node in a private subnet sends a request to an internet destination. AWS checks the private subnet's route table, which sends internet-bound traffic (`0.0.0.0/0`) to the NAT Gateway. The NAT Gateway replaces the node's private source IP with its Elastic IP (EIP), then sends the request using the route from its public subnet through the Internet Gateway. The reply returns to the EIP; the NAT Gateway maps it back to the node that started the request. The EIP is the NAT Gateway's public address, not a separate routing device or hop.
-
-  ```text
-  Outbound request:
-  EKS node (private subnet)
-    -> private route table
-    -> NAT Gateway (uses its EIP as the public source address)
-    -> public route table
-    -> Internet Gateway
-    -> internet destination
-
-  Reply:
-  internet destination
-    -> Internet Gateway
-    -> NAT Gateway's EIP
-    -> NAT Gateway
-    -> EKS node that started the request
-  ```
-
-  If a route is missing or the NAT Gateway is not `Available`, private-subnet internet egress may not work. The console displays deployed state; Terraform configuration and plan describe what should be created.
-
-  **How does the private route table know about the NAT Gateway?** It does not discover it automatically. The VPC module contains Terraform resource definitions that connect them: the route resource uses the private route table ID as its route table and the NAT Gateway ID as its target. Because this repository sets `enable_nat_gateway = true` and `single_nat_gateway = true`, and leaves `create_private_nat_gateway_route` at its default of `true`, Terraform creates both resources and the connecting route. AWS then stores that route in the route table.
-
-  **What happens to a packet?** An EKS node sends traffic to an address outside the VPC. Its subnet is associated with the private route table. AWS checks the destination, finds the `0.0.0.0/0 → NAT Gateway` rule, and forwards the packet to that NAT Gateway. The NAT Gateway is in a public subnet; that subnet's route table has a route to the Internet Gateway, so the NAT Gateway can send the request out. The NAT Gateway tracks the outbound connection and allows the response back to the node.
-
-  ```text
-  Terraform module creates this rule:
-  private route table: 0.0.0.0/0 -> nat-abc123 (NAT Gateway ID)
-
-  Then AWS forwards traffic along the configured route:
-  EKS node -> private route table -> NAT Gateway
-            -> public route table -> Internet Gateway -> internet
-  ```
-
-  So **the route must exist**; AWS does not guess that private subnets should use NAT just because a NAT Gateway exists. In this project, the reusable VPC module creates the route for you from its internal Terraform code and defaults. You would only write a separate route resource yourself if you were not using this module or needed custom routing behavior.
-
-  So when an EKS node needs to download something, the path is:
-
-  ```text
-  EKS node in private subnet
-      -> private route table
-      -> NAT Gateway in public subnet
-      -> public route table
-      -> Internet Gateway
-      -> internet
-  ```
-
-  The NAT Gateway translates the node's private source address for outbound traffic. It allows responses for connections the private resource started to come back, but does not make that resource directly reachable from the internet. The NAT Gateway has an hourly and data-processing cost; using one saves cost compared with one per AZ, but means private-subnet internet egress depends on that single AZ's NAT Gateway.
+  **Verify in the AWS Console** (select `us-east-1`): In **VPC → NAT Gateways**, check that the gateway is **Available**, uses public subnet `10.0.1.0/24`, and has an Elastic IP. In **VPC → Route tables**, verify that the private EKS subnets are associated with a route table whose `0.0.0.0/0` target is that NAT Gateway, and that the public subnet's `0.0.0.0/0` target is an Internet Gateway. You can also find the NAT Gateway's EIP under **EC2 → Network & Security → Elastic IPs**. The console shows deployed state; Terraform configuration and plan show what should be created.
 
 - `single_nat_gateway = true`:
   tells the VPC module to create one NAT Gateway and use it for the private subnet groups, instead of creating a separate NAT Gateway for each Availability Zone. The module puts that gateway in the first public subnet (`10.0.1.0/24`, in `us-east-1a` in this configuration) and points the private route table at it.
@@ -224,9 +151,22 @@ module "vpc" {
   **Why pass the name to the RDS module?** The VPC module creates the RDS DB subnet group and exports its name as a Terraform output; `envs/dev/main.tf` passes that output to the RDS module, which supplies it to AWS when creating the database so RDS knows which subnets it may use. The subnet group is an RDS resource shown under **RDS → Subnet groups** in the console, even though the VPC module creates it.
 
 - `public_subnet_tags` and `private_subnet_tags`:
-  these are important for Kubernetes and AWS Load Balancer integration, so EKS and ELB can discover the correct subnets.
-  **Why these values?** They are standard subnet-discovery markers used by the AWS Load Balancer Controller and related Kubernetes AWS integrations, not values AWS invents automatically. When Kubernetes requests a load balancer, the controller can inspect subnet tags to find candidate subnets of the requested type. `kubernetes.io/role/elb = "1"` is a marker that says "this subnet is eligible for an internet-facing load balancer"; `kubernetes.io/role/internal-elb = "1"` similarly marks a candidate for an internal load balancer. The value `"1"` is a conventional tag value the controller recognizes—it is not a count, a switch that creates a load balancer, or an instruction to route traffic. The private-subnet key `kubernetes.io/cluster/${var.project}-${var.env}-cluster = "owned"` expands in dev to `kubernetes.io/cluster/pharma-dev-cluster = "owned"` and marks the subnet as associated with this EKS cluster for integrations that use cluster tags during discovery.
-  **Where to verify in AWS:** open **VPC → Subnets**, select a public or private subnet, and inspect its **Tags** tab. Look for `kubernetes.io/role/elb` on public subnets, and `kubernetes.io/role/internal-elb` plus `kubernetes.io/cluster/pharma-dev-cluster` on private subnets. Tags label subnets for discovery; they do not make a subnet public or private by themselves—routing and route-table associations determine that.
+  Think of these as **labels attached to AWS subnets**. They help the AWS Load Balancer Controller choose where to place a load balancer when Kubernetes asks for one.
+
+  **Dev example — how a public ALB is requested and placed:**
+
+  1. The dev Helm values for [pharma-ui](../../gitops/envs/dev/values-pharma-ui.yaml) and [api-gateway](../../gitops/envs/dev/values-api-gateway.yaml) set `ingress.enabled: true`, `className: alb`, and `alb.ingress.kubernetes.io/scheme: internet-facing`. Helm renders these settings into Kubernetes `Ingress` resources.
+  2. Argo CD applies those Ingresses to EKS. The AWS Load Balancer Controller, installed by [scripts/01_install_prerequisites.py](../../scripts/01_install_prerequisites.py), watches for Ingresses with class `alb` and notices them. Its IAM role lets it query AWS and request load-balancer creation.
+  3. The controller reads the `internet-facing` setting and asks AWS for subnet information. It looks for suitable subnets in this VPC tagged `kubernetes.io/role/elb = "1"`. Terraform adds that tag to both public subnets in [main.tf](./main.tf).
+  4. The controller selects suitable public subnets across Availability Zones and asks AWS to create the ALB there. Both Ingresses use the group name `pharma-dev`, so they can share one ALB. The ALB receives user traffic and forwards it to the appropriate application.
+
+  For an internal load balancer, the controller can use subnets tagged `kubernetes.io/role/internal-elb = "1"`. The tag `kubernetes.io/cluster/${var.project}-${var.env}-cluster = "owned"` marks a subnet as belonging to this EKS cluster; in dev, the key is `kubernetes.io/cluster/pharma-dev-cluster`.
+
+  **Who adds the labels?** Terraform adds them to the AWS subnets in [main.tf](./main.tf). Kubernetes does not send them, and the ALB does not inspect them; the controller reads them from AWS. The controller recognizes these standard labels. A label by itself does nothing: an Ingress request and a running, authorized controller are needed. The labels also do not make a subnet public or private; its routes determine that.
+
+  **In this project:** the VPC configuration adds the labels, and the setup script installs the controller. An Ingress must still be applied to the cluster to request an ALB.
+
+  **Where to check:** in the AWS Console, open **VPC → Subnets**, select a subnet, and inspect **Tags**.
 
 ---
 

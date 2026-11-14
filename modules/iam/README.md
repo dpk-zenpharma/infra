@@ -116,14 +116,64 @@ data "aws_iam_policy_document" "eso_assume_role" {
 }
 ```
 
+**What this does:** `data "aws_iam_policy_document"` builds a JSON trust policy for the IAM role; it does not create the role or grant access to Secrets Manager by itself. The role uses this policy to decide **who may assume it**:
+
+- `principals` identifies this EKS cluster's OIDC provider (`var.oidc_provider_arn`) as a trusted identity source. The ESO Helm install creates the `external-secrets` service account inside the `external-secrets` namespace.
+
+  They are different Kubernetes objects:
+  - the namespace groups resources,
+  - while the service account is the identity ESO's pod uses.
+
+  The setup script annotates the service account with this IAM role. When the ESO pod runs using that account, Kubernetes provides it with a short-lived service-account token for AWS STS.
+
+  - AWS STS (Security Token Service) is the AWS service that issues temporary credentials to an identity that is allowed to assume an IAM role. In this setup, the ESO pod presents its Kubernetes service-account token to STS; if the role’s trust conditions match, STS returns temporary credentials ESO can use to read Secrets Manager.
+
+  Terraform configures AWS to trust the cluster's OIDC provider; it does not create the token.
+
+- `actions` allows the web-identity sign-in action, `sts:AssumeRoleWithWebIdentity`.
+
+  `sts:AssumeRoleWithWebIdentity` allows the ESO pod to ask AWS STS to exchange its Kubernetes token for temporary AWS credentials for this IAM role.
+
+  In this setup: ESO presents its token → STS checks the trusted EKS issuer and the sub/aud conditions → if they match, STS returns temporary credentials. This action only allows ESO to assume the role; the role’s separate permissions policy determines what ESO can do afterward, such as read Secrets Manager secrets.
+- `sub` means **subject**:  identifies who the token is for. Here it must be system:serviceaccount:external-secrets:external-secrets—the external-secrets service account in the external-secrets namespace.
+- `aud` means **audience**: which service the token is intended for. This policy requires `sts.amazonaws.com`, because AWS Security Token Service (STS) is the service that exchanges the EKS OIDC token for temporary AWS credentials.
+
+Note: `aud` says who the token is intended for—here, AWS STS, which performs the exchange. `sub` identifies who is requesting access—the ESO service account in the `external-secrets` namespace. STS checks both before issuing temporary credentials.
+- Both conditions use `StringEquals`, so both token values must match exactly for STS to allow the role assumption. The condition keys are scoped to this cluster's OIDC provider.
+- `replace(..., "https://", "")` removes the URL scheme because OIDC token claims use the provider URL without `https://` as the condition key.
+
+In effect, **only a pod using that specific service account in this EKS cluster can request this role through OIDC**. This is the role's trust/identity check—not its AWS permissions. The separate policy below grants the role permission to read the project's Secrets Manager secrets.
+
+**When does ESO fetch a secret?** The setup script creates Kubernetes `ExternalSecret` resources that tell ESO which AWS secrets to copy. For example, the dev `db-credentials` resource points to `/pharma/dev/db-credentials`, and `jwt-secret` points to `/pharma/dev/jwt-secret`. When ESO sees these resources, it reads the requested values from AWS Secrets Manager and creates corresponding Kubernetes Secrets. Each resource has `refreshInterval: 1h`, so ESO checks for updates hourly as well as performing its initial sync.
+
+**When the token is used:** To perform that read, the ESO pod presents its projected service-account token to AWS STS and requests `sts:AssumeRoleWithWebIdentity`. STS checks that the token is from the trusted EKS OIDC issuer and that its `sub` and `aud` claims match the conditions above. If they do, STS returns temporary credentials for `pharma-dev-eso-role`; ESO uses those credentials to read the requested values from Secrets Manager. The token proves the pod's Kubernetes identity; the temporary credentials let it make the AWS calls allowed by the role's separate permissions policy. Application pods then use the Kubernetes Secrets ESO created.
+
 ### How this role connects to the setup scripts
 
 This section of `main.tf` configures **AWS-side permissions and trust**. It does not install ESO or configure Kubernetes by itself. These are separate steps in the project:
 
 1. **Terraform creates the IAM role and its permissions.** The role is created by the `resource "aws_iam_role" "eso_role"` block in [modules/iam/main.tf](./main.tf#L26-L35). Its `name` is built from `"${var.project}-${var.env}-eso-role"`. The dev environment passes `project = "pharma"` and `env = "dev"` through the `module "iam"` block in [envs/dev/main.tf](../../envs/dev/main.tf#L68-L76), so Terraform creates an AWS IAM role named **`pharma-dev-eso-role`**. The `assume_role_policy` connects that role to the EKS OIDC provider and allows the `external-secrets` Kubernetes service account in the `external-secrets` namespace to use it. A separate policy, attached to this role below, allows `secretsmanager:GetSecretValue` and `secretsmanager:DescribeSecret` for secrets under `/pharma/*`.
-2. **The prerequisites script installs ESO.** [scripts/01_install_prerequisites.py](../../scripts/01_install_prerequisites.py) installs the ESO controller with Helm in the `external-secrets` namespace. Installing the controller gives the cluster the software, but does not by itself connect it to this IAM role.
-3. **The ESO setup script connects the controller to the role.** [scripts/03_setup_external_secrets.py](../../scripts/03_setup_external_secrets.py) builds the role ARN from the AWS account ID and role name, then annotates the `external-secrets` Kubernetes service account with `eks.amazonaws.com/role-arn=<role ARN>`. It restarts the controller so its pods use that service account configuration.
+
+    Note:
+    Those are two allowed AWS actions in the permissions policy—not two separate policies:
+
+    - `secretsmanager:GetSecretValue` lets ESO retrieve the secret’s actual value, such as the database password.
+    - `secretsmanager:DescribeSecret` lets ESO retrieve information about a secret, such as its name, ARN, and status.
+
+    Together, they let ESO find and read the Secrets Manager secrets covered by the policy’s /pharma/* resource scope.
+
+2. **The prerequisites script installs ESO.** [scripts/01_install_prerequisites.py](../../scripts/01_install_prerequisites.py) installs the ESO controller with Helm in the `external-secrets` namespace. The Helm chart creates the Kubernetes service account named `external-secrets` for the controller to use.
+3. **The ESO setup script connects the controller to the role.** [scripts/03_setup_external_secrets.py](../../scripts/03_setup_external_secrets.py) builds the role ARN from the AWS account ID and role name, then annotates the `external-secrets` Kubernetes service account with `eks.amazonaws.com/role-arn=<role ARN>`. It restarts the controller so its pods use the service account and updated role annotation.
 4. **That same setup script tells ESO what to read from AWS.** It creates a `ClusterSecretStore` that selects AWS Secrets Manager, the region, and the `external-secrets` service account. It also creates `ExternalSecret` resources that name the AWS secret paths and map JSON fields into Kubernetes Secrets.
+
+**Where to see the service account:** run these commands against the EKS cluster after the scripts have completed:
+
+```bash
+kubectl get serviceaccount external-secrets -n external-secrets
+kubectl describe serviceaccount external-secrets -n external-secrets
+```
+
+The first confirms it exists; the second shows its details, including the IAM role annotation added by the ESO setup script.
 
 The relationship is:
 
@@ -284,9 +334,16 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 }
 ```
 
+`thumbprint_list` tells AWS which certificate fingerprints to trust when connecting securely to GitHub’s OIDC provider.
+
+The two entries are alternative trusted certificate fingerprints, not two tokens or two permissions. They let AWS validate GitHub’s OIDC endpoint against either certificate in the configured list—helpful if the certificate chain changes—so AWS can keep trusting GitHub during a transition.
 ### Purpose
 
 This registers GitHub as a trusted OIDC provider for AWS.
+
+This file configures GitHub Actions to access specific AWS services without storing permanent AWS keys in GitHub.
+
+During CI, workflows in the frontend and backend repositories use GitHub’s OIDC token to assume the `pharma-dev-github-actions-role`. The role allows them to push container images to ECR and read EKS cluster information—it does not grant access to Secrets Manager secret values. The trust policy limits which repositories and branches can assume the role.
 
 Then the trust policy restricts which repositories and branches are allowed:
 
@@ -321,6 +378,13 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
 }
 ```
 
+Note:
+- Yes we can see this `aws_iam_openid_connect_provider.github_actions` in AWS. In the AWS Console, open IAM → Identity providers and look for `token.actions.githubusercontent.com.` Select it to view its audience (sts.amazonaws.com) and provider details. The Terraform address `aws_iam_openid_connect_provider.github_actions ` is Terraform’s code reference; AWS shows the provider URL, not that Terraform label.
+
+- This `sub` condition values list are the *allowlist*: they specify which GitHub repositories and branches may assume the AWS role.
+
+  For example, `repo:${var.github_org}/frontend:ref:refs/heads/main` matches a workflow running from the frontend repository’s main branch. When a workflow requests AWS credentials, AWS checks the GitHub OIDC token’s sub claim against these entries. Only matching branches in the listed repositories can assume the role; other branches aren’t allowed by this policy.
+
 ### Why this is important
 
 This is a security best practice because:
@@ -329,30 +393,24 @@ This is a security best practice because:
 - the role is assumed only from approved repos/branches
 - the token is short-lived and automatically expires
 
-Then a policy is attached to the role:
+### Permissions attached to the GitHub Actions role
+
+The policy `aws_iam_policy.github_actions_ci_policy` in [github-actions-oidc.tf](./github-actions-oidc.tf) defines what an approved workflow can do after it assumes the role. The `aws_iam_role_policy_attachment.github_actions_ci_policy_attachment` resource attaches that policy to `aws_iam_role.github_actions_ci`; it does not create another role.
 
 ```hcl
-resource "aws_iam_role" "github_actions_ci" {
-  name                 = "${var.project}-${var.env}-github-actions-role"
-  assume_role_policy   = data.aws_iam_policy_document.github_actions_assume_role.json
-  max_session_duration = 3600
+resource "aws_iam_role_policy_attachment" "github_actions_ci_policy_attachment" {
+  role       = aws_iam_role.github_actions_ci.name
+  policy_arn = aws_iam_policy.github_actions_ci_policy.arn
 }
 ```
 
-The permissions include:
+The attached policy has three permission groups:
 
-- `ecr:GetAuthorizationToken`
-- `ecr:PutImage`
-- `ecr:BatchGetImage`
-- `eks:DescribeCluster`
+- **`ECRAuth` — `ecr:GetAuthorizationToken`:** lets the workflow log in to Amazon ECR. AWS requires `Resource = "*"` for this action.
+- **`ECRPush` — ECR repository actions:** lets the workflow check image layers, upload layers, publish an image, and inspect repositories/images. The resource ARN limits these actions to ECR repositories in this AWS account (`arn:aws:ecr:*:${var.aws_account_id}:repository/*`).
+- **`EKSRead` — `eks:DescribeCluster` and `eks:ListClusters`:** these permissions let a workflow look up EKS cluster details or list clusters. They are included in the role's policy, but the current frontend/backend build workflows do not use them; those workflows use the role to log in to ECR and push images. **So EKSRead is not needed for the current build-and-push flow.** It would only be needed if a workflow were later extended to query EKS (for example, to get cluster details before a deployment). These permissions do not themselves allow the workflow to deploy to Kubernetes.
 
-### Why
-
-This allows GitHub Actions to:
-
-- push built images to ECR
-- verify the EKS cluster is available
-- deploy or validate the application pipeline
+**Example CI flow:** a push to an allowed repository branch starts a GitHub Actions workflow. The `configure-aws-credentials` step exchanges the GitHub OIDC token for temporary credentials for this role. The workflow then logs in to ECR, builds the application image, and pushes it to the repository. AWS checks the attached policy for each requested action; permissions outside these listed actions/resources are not granted by this policy.
 
 ---
 

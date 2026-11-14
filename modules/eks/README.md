@@ -185,21 +185,23 @@ endpoint_public_access  = true
 
 This allows the Kubernetes API to be accessible both inside the VPC and to authorized clients externally. This is useful for cluster administration and automation while still using VPC-based networking for workloads.
 
+Public access is enabled so you can run kubectl from your laptop to inspect or manage the cluster without connecting to the VPC first. The current GitHub Actions workflow only runs Terraform, so it does not need public access to deploy Kubernetes workloads; if you don’t need laptop access, you can disable public access or limit it to trusted IPs.
+
 #### IRSA
 
 ```hcl
 enable_irsa = true
 ```
 
-This is a major feature. IRSA enables workloads in Kubernetes to assume AWS IAM roles directly via service accounts.
+IRSA lets a Kubernetes pod obtain temporary AWS credentials for a specific IAM role without storing AWS access keys in the pod. EKS provides the pod with a service-account token, and AWS STS exchanges it for credentials only if the role trusts this cluster and that service account.
 
-This is used for:
+In this project:
 
-- secrets access
-- ArgoCD access
-- AWS Load Balancer Controller access
+- **Secrets Manager:** The External Secrets controller uses IRSA to read the application secrets it is configured to sync from AWS Secrets Manager. It creates Kubernetes Secrets from those values, which application pods can then use; the application pods do not need direct AWS access for this.
+- **Load balancers:** The AWS Load Balancer Controller uses IRSA to call AWS APIs and create/manage load balancers for Kubernetes Ingress resources.
+- **ArgoCD:** An IAM role is defined for ArgoCD, but its service account is not currently connected to that role in the setup scripts, so ArgoCD IRSA is not configured end-to-end.
 
-This is more secure than storing long-lived AWS credentials in pods.
+This avoids giving pods long-lived AWS access keys and limits AWS access to the permissions granted to each role.
 
 #### Cluster creator permissions
 
@@ -207,7 +209,7 @@ This is more secure than storing long-lived AWS credentials in pods.
 enable_cluster_creator_admin_permissions = true
 ```
 
-This grants the user or role that created the cluster admin-level Kubernetes access so cluster setup can happen smoothly.
+In this project, this permission lets the AWS identity that creates the EKS cluster use `kubectl` to install and configure tools that run inside the cluster. Our setup script installs ArgoCD in the `argocd` namespace to deploy applications, External Secrets to copy selected values from AWS Secrets Manager into Kubernetes Secrets, and the AWS Load Balancer Controller to create AWS load balancers for Kubernetes Ingresses. This permission allows those setup steps but does not install the tools automatically; without it, the cluster could be created, but the setup commands would be denied.
 
 #### Addons
 
@@ -223,12 +225,18 @@ addons = {
 }
 ```
 
-These are core EKS add-ons:
+For the `vpc-cni` add-on, `most_recent = true` tells Terraform to use the newest version compatible with this EKS cluster. `before_compute = true` makes Terraform install the VPC CNI before creating the worker nodes, so pods have networking available as nodes start. The other add-ons also use `most_recent = true`, but are not marked to install before the worker nodes.
 
-- `vpc-cni`: enables pod networking inside the VPC
-- `kube-proxy`: maintains network rules for nodes and pods
-- `coredns`: provides cluster DNS for service discovery
-- `eks-pod-identity-agent`: supports pod identity for AWS access without classic IAM roles on EC2 instances
+These add-ons provide basic networking and AWS identity features used by workloads in the cluster:
+
+- `vpc-cni`: gives each pod a VPC IP address from the subnet where its worker node is running. In this dev setup, EKS and its worker nodes use the private subnets `10.0.3.0/24` and `10.0.4.0/24`; AWS creates these subnets from the CIDRs in `envs/dev/main.tf`, and Terraform passes their subnet IDs to the EKS module. The VPC CNI assigns available addresses from those subnets to pods as Kubernetes starts them.
+
+  When a pod sends traffic to another subnet in the same VPC—for example, an application pod connecting to RDS—AWS uses the VPC's built-in local route to deliver the traffic; EKS does not fetch or manage the route table. RDS is placed in the database subnets `10.0.5.0/24` and `10.0.6.0/24`, and its security group allows PostgreSQL traffic on port `5432` from the EKS node security group. Both the route and security rules must allow traffic for the connection to work.
+- `kube-proxy`: a Kubernetes Service gives an app a steady in-cluster address for reaching another app. `kube-proxy` sets up the node's network rules so requests to that address are forwarded to a ready pod for that Service; the caller does not need to know the pod's IP, which can change when pods are replaced.
+  
+  **Project example:** When `api-gateway` needs to send a catalog request, it connects to the `drug-catalog-svc` Kubernetes Service. That Service forwards the request to a ready `drug-catalog` pod, so `api-gateway` does not need to know or track the pod's changing IP address.
+- `coredns`: lets workloads find Kubernetes Services by name instead of needing their changing IP addresses. For example, a pod can connect to `api-service` by its Kubernetes DNS name.
+- `eks-pod-identity-agent`: EKS runs this agent on the cluster's worker nodes—the EC2 instances that run application pods. In our dev environment, these are the `t3.small` instances in the `main` managed node group. The agent can help a pod get temporary AWS credentials only when a Pod Identity association is configured for it. This project enables the agent but does not define any such associations, so pods currently get AWS access through configured IRSA roles instead; the agent by itself grants no AWS permissions.
 
 #### Managed node group
 
