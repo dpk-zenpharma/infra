@@ -188,12 +188,14 @@ Typical pattern in this project:
 module "iam" {
   source = "../../modules/iam"
 
-  project           = local.project
-  env               = local.env
-  oidc_provider_arn = module.eks.oidc_provider_arn
-  oidc_provider_url = module.eks.cluster_oidc_issuer_url
-  aws_account_id    = data.aws_caller_identity.current.account_id
-  github_org        = var.github_org
+  project                       = local.project
+  env                           = local.env
+  oidc_provider_arn             = module.eks.oidc_provider_arn
+  oidc_provider_url             = module.eks.cluster_oidc_issuer_url
+  aws_account_id                = data.aws_caller_identity.current.account_id
+  github_org                    = var.github_org
+  github_owner_id               = var.github_owner_id
+  github_frontend_repository_id = var.github_frontend_repository_id
 }
 ```
 
@@ -258,6 +260,16 @@ variable "github_org" {
   type        = string
   default     = "zenpharma"
 }
+
+variable "github_owner_id" {
+  description = "Numeric GitHub owner ID for the frontend repository"
+  type        = string
+}
+
+variable "github_frontend_repository_id" {
+  description = "Numeric GitHub repository ID for the frontend repository"
+  type        = string
+}
 ```
 
 ### Purpose
@@ -267,6 +279,7 @@ These are environment-sensitive values.
 - `db_password` is used for database access
 - `jwt_secret` is used by the application to sign tokens
 - `github_org` is used to restrict GitHub OIDC trust to the intended repos
+- `github_owner_id` and `github_frontend_repository_id` form the frontend's immutable OIDC subject and are supplied through GitHub Actions repository variables `GH_OWNER_ID` and `GH_FRONTEND_REPOSITORY_ID`
 
 Because they are marked `sensitive`, Terraform avoids printing them in logs.
 

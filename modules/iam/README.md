@@ -370,6 +370,8 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
       values = [
         "repo:${var.github_org}/frontend:ref:refs/heads/main",
         "repo:${var.github_org}/frontend:ref:refs/heads/develop",
+        "repo:${var.github_org}@${var.github_owner_id}/frontend@${var.github_frontend_repository_id}:ref:refs/heads/main",
+        "repo:${var.github_org}@${var.github_owner_id}/frontend@${var.github_frontend_repository_id}:ref:refs/heads/develop",
         "repo:${var.github_org}/backend:ref:refs/heads/main",
         "repo:${var.github_org}/backend:ref:refs/heads/develop",
       ]
@@ -383,7 +385,7 @@ Note:
 
 - This `sub` condition values list are the *allowlist*: they specify which GitHub repositories and branches may assume the AWS role.
 
-  For example, `repo:${var.github_org}/frontend:ref:refs/heads/main` matches a workflow running from the frontend repository’s main branch. When a workflow requests AWS credentials, AWS checks the GitHub OIDC token’s sub claim against these entries. Only matching branches in the listed repositories can assume the role; other branches aren’t allowed by this policy.
+  GitHub's immutable OIDC subject for the frontend repository includes its owner and repository IDs. The `github_owner_id` and `github_frontend_repository_id` variables must match the IDs in the repository's OIDC `sub` claim. AWS checks the token's `sub` against these entries; only matching repositories and branches can assume the role.
 
 ### Why this is important
 

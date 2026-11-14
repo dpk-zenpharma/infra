@@ -27,3 +27,23 @@ variable "github_org" {
   description = "GitHub organization or username that owns frontend and backend"
   type        = string
 }
+
+variable "github_owner_id" {
+  description = "Numeric GitHub owner ID for the frontend repository"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "github_owner_id must contain only digits."
+  }
+}
+
+variable "github_frontend_repository_id" {
+  description = "Numeric GitHub repository ID for the frontend repository"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_frontend_repository_id))
+    error_message = "github_frontend_repository_id must contain only digits."
+  }
+}

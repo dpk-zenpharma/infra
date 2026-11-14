@@ -449,10 +449,20 @@ In `.github/workflows/terraform.yml`, update the `github_org` value:
     terraform plan \
       -var="db_password=${{ secrets.DEV_DB_PASSWORD }}" \
       -var="jwt_secret=${{ secrets.DEV_JWT_SECRET }}" \
-      -var="github_org=YOUR-GITHUB-USERNAME" \    # ← change this
+      -var="github_org=${{ vars.GH_ORG }}" \
+      -var="github_owner_id=${{ vars.GH_OWNER_ID }}" \
+      -var="github_frontend_repository_id=${{ vars.GH_FRONTEND_REPOSITORY_ID }}" \
       -out=tfplan \
       -no-color
 ```
+
+Configure these under **Settings → Secrets and variables → Actions → Variables** in the infra repository:
+
+| Variable | Value |
+|---|---|
+| `GH_ORG` | `dpk-zenpharma` |
+| `GH_OWNER_ID` | GitHub owner ID from the workflow's OIDC `sub` claim |
+| `GH_FRONTEND_REPOSITORY_ID` | Frontend repository ID from the workflow's OIDC `sub` claim |
 
 ### 7.4 Commit and Push Changes
 
@@ -483,6 +493,16 @@ Add the following secrets:
 | `AWS_SECRET_ACCESS_KEY` | Your IAM user secret access key | AWS authentication for Terraform |
 | `DEV_DB_PASSWORD` | A strong password (min 8 chars) | RDS PostgreSQL master password |
 | `DEV_JWT_SECRET` | A long random string | JWT signing secret for the app |
+
+### 8.2 Add Repository Variables
+
+Go to **Settings → Secrets and variables → Actions → Variables** and add:
+
+| Variable Name | Value | Description |
+|---|---|---|
+| `GH_ORG` | `dpk-zenpharma` | GitHub owner name |
+| `GH_OWNER_ID` | `335423335` | Numeric GitHub owner ID from the frontend OIDC `sub` claim |
+| `GH_FRONTEND_REPOSITORY_ID` | `1394771315` | Numeric frontend repository ID from the OIDC `sub` claim |
 
 **Generating a strong random secret:**
 ```bash
@@ -809,7 +829,9 @@ terraform init
 terraform destroy \
   -var="db_password=dummy" \
   -var="jwt_secret=dummy" \
-  -var="github_org=YOUR-GITHUB-USERNAME"
+  -var="github_org=dpk-zenpharma" \
+  -var="github_owner_id=335423335" \
+  -var="github_frontend_repository_id=1394771315"
 ```
 
 Type `yes` when prompted.
